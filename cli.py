@@ -82,6 +82,37 @@ def _ask_missing(args: argparse.Namespace) -> argparse.Namespace:
     return args
 
 
+def _ask_summarize(args: argparse.Namespace) -> argparse.Namespace:
+    """Ask whether to run the summarization step, and which model to use."""
+    try:
+        import questionary
+    except ImportError:
+        return args
+
+    if args.summarize is None:
+        answer = questionary.confirm(
+            "Run summarization step? (adds LLM summaries to chunks before embedding)",
+            default=False,
+        ).ask()
+        if answer is None:
+            sys.exit(0)
+        args.summarize = answer
+
+    if args.summarize and args.llm_model is None:
+        from summarizer import DEFAULT_LLM_MODEL
+        instruction = f"Current default: {DEFAULT_LLM_MODEL}" if DEFAULT_LLM_MODEL else "(required — set LLM_MODEL in .env or enter below)"
+        raw = questionary.text(
+            "LLM model id for summarization:",
+            default=DEFAULT_LLM_MODEL or "",
+            instruction=instruction,
+        ).ask()
+        if raw is None:
+            sys.exit(0)
+        args.llm_model = raw.strip() or DEFAULT_LLM_MODEL or None
+
+    return args
+
+
 def _confirm(args: argparse.Namespace, detected_languages: list[str]) -> bool:
     """Print a summary and ask for confirmation."""
     try:
@@ -95,6 +126,10 @@ def _confirm(args: argparse.Namespace, detected_languages: list[str]) -> bool:
     else:
         lang_label += " (auto-detected)"
 
+    summarize_label = "no"
+    if args.summarize:
+        summarize_label = f"yes (model={args.llm_model or '(from .env)'})"
+
     print()
     print("  Languages  :", lang_label)
     print("  Repo path  :", args.repo_path)
@@ -102,6 +137,7 @@ def _confirm(args: argparse.Namespace, detected_languages: list[str]) -> bool:
     print("  JSONL path :", args.chunks_output or "(auto)")
     print("  Embed model:", args.embed_model or "(from .env)")
     print("  Max chunk  :", f"{args.max_chunk_chars:,} chars" if args.max_chunk_chars else "(no limit)")
+    print("  Summarize  :", summarize_label)
     print()
 
     return questionary.confirm("Proceed with indexing?", default=True).ask() or False
@@ -157,6 +193,33 @@ def main() -> int:
         help="Skip chunks larger than N chars. 0 = no limit. Suggested: 6000",
     )
     ap.add_argument(
+        "--summarize",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        dest="summarize",
+        help="Run LLM summarization step after chunking (default: ask interactively)",
+    )
+    ap.add_argument(
+        "--llm-model",
+        default=None,
+        dest="llm_model",
+        help="LLM model id for summarization (default: LLM_MODEL from .env)",
+    )
+    ap.add_argument(
+        "--llm-base-url",
+        default=None,
+        dest="llm_base_url",
+        help="LLM server base URL for summarization (default: LLM_BASE_URL from .env)",
+    )
+    ap.add_argument(
+        "--summary-max-tokens",
+        type=int,
+        default=256,
+        dest="summary_max_tokens",
+        metavar="N",
+        help="Max tokens per summary response (default: 256)",
+    )
+    ap.add_argument(
         "--yes",
         action="store_true",
         help="Skip confirmation prompt",
@@ -185,6 +248,12 @@ def main() -> int:
             )
             return 1
 
+    # Ask about summarization (skipped if --yes or --summarize/--no-summarize passed)
+    if not args.yes:
+        args = _ask_summarize(args)
+    elif args.summarize is None:
+        args.summarize = False
+
     # Confirmation
     if not args.yes and not _confirm(args, languages):
         print("Aborted.")
@@ -200,6 +269,10 @@ def main() -> int:
             chunks_output=args.chunks_output,
             embed_model=args.embed_model,
             max_chunk_chars=args.max_chunk_chars,
+            summarize=args.summarize or False,
+            llm_model=args.llm_model,
+            llm_base_url=args.llm_base_url,
+            summary_max_tokens=args.summary_max_tokens,
         )
         print(f"\nPipeline complete. Chunks saved at: {jsonl}")
         return 0

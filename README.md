@@ -3,7 +3,7 @@
 A semantic chunking and indexing pipeline that turns source code repositories into a searchable vector database. Query your codebase in natural language and get precise, cited answers from an LLM.
 
 ```
-[1] Chunking  →  [2] Embedding  →  [3] Qdrant Storage  →  [4] RAG Query
+[1] Chunking  →  [2] Summarization (optional)  →  [3] Embedding  →  [4] Qdrant Storage  →  [5] RAG Query
 ```
 
 Keeping the stages separate means you can swap the embedding model without re-parsing, inspect chunks before indexing, and version the JSONL output.
@@ -99,14 +99,19 @@ You will be prompted for:
 2. **Collection name** — Qdrant collection name
 3. **JSONL output path** — intermediate chunk file (defaults to `chunks/<collection>.jsonl`)
 4. **Embedding model** — defaults to `EMBED_MODEL` from `.env`
+5. **Summarization** — whether to run an LLM summarization step before embedding (default: No)
+   - If yes, the LLM model is also prompted (defaults to `LLM_MODEL` from `.env`)
 
-The confirmation screen shows which languages were detected before proceeding:
+The confirmation screen shows the full configuration before proceeding:
 
 ```
   Languages  : typescript, terraform (auto-detected)
   Repo path  : /home/user/my-infra-app
   Collection : my_infra_app
-  ...
+  JSONL path : chunks/my_infra_app.jsonl
+  Embed model: (from .env)
+  Max chunk  : (no limit)
+  Summarize  : yes (model=qwen3-4b)
 Proceed with indexing? [Y/n]
 ```
 
@@ -116,6 +121,27 @@ All prompts can be bypassed with flags for scripted use:
 python cli.py \
   --repo-path /abs/path/to/my-app \
   --collection my_app \
+  --yes
+```
+
+Enable summarization non-interactively with `--summarize`:
+
+```bash
+python cli.py \
+  --repo-path /abs/path/to/my-app \
+  --collection my_app \
+  --summarize \
+  --llm-model qwen3-4b \
+  --yes
+```
+
+Use `--no-summarize` to skip the prompt explicitly:
+
+```bash
+python cli.py \
+  --repo-path /abs/path/to/my-app \
+  --collection my_app \
+  --no-summarize \
   --yes
 ```
 
@@ -219,15 +245,42 @@ Each language has a dedicated system prompt that gives the LLM the right domain 
 
 ## Summarization (Optional)
 
-Add LLM-generated summaries to each chunk for richer retrieval:
+The summarizer adds a `summary` field to each chunk with a 1–3 sentence LLM description of what the code does. Summaries are stored as payload in Qdrant alongside the chunk, enriching retrieval context.
+
+### Via the CLI (recommended)
+
+The summarization step is offered interactively during `python cli.py`. It runs between chunking and embedding, and the JSONL is updated in place with the summaries before they are indexed.
+
+For scripted use:
+
+```bash
+python cli.py \
+  --repo-path /abs/path/to/my-app \
+  --collection my_app \
+  --summarize \
+  --llm-model qwen3-4b \
+  --summary-max-tokens 256 \
+  --yes
+```
+
+CLI options for summarization:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--summarize` / `--no-summarize` | ask interactively | Enable or skip the summarization step |
+| `--llm-model` | `LLM_MODEL` env | LLM model id for summarization |
+| `--llm-base-url` | `LLM_BASE_URL` env | LLM server base URL |
+| `--summary-max-tokens N` | 256 | Max tokens per summary response |
+
+### Standalone
+
+Run the summarizer on an existing JSONL independently:
 
 ```bash
 python summarizer.py chunks/my-app.jsonl --model qwen3-4b
 ```
 
-Writes to `chunks/my-app-summarized.jsonl`. Supports checkpoint resumption — safe to interrupt and restart. The code block language in the prompt is inferred automatically from each chunk's `language` field.
-
-Options:
+Writes to `chunks/my-app-summarized.jsonl`. Supports checkpoint resumption — safe to interrupt and restart.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -255,7 +308,8 @@ Each line is a JSON object:
   "start_line":   24,
   "end_line":     30,
   "content_hash": "a3f1c2d4...",
-  "language":     "typescript"
+  "language":     "typescript",
+  "summary":      "Retrieves a User by ID from the database, returning null if not found."
 }
 ```
 
@@ -269,6 +323,7 @@ Key fields:
 | `kind` | `method` / `function` / `constructor` / `property` / `class` / `interface` / `type` / `resource` / `variable` / ... |
 | `file_path`, `start_line`, `end_line` | "Open in editor" navigation and neighbour-context expansion |
 | `content_hash` | Incremental indexing — only re-embeds changed chunks |
+| `summary` | *(optional)* LLM-generated 1–3 sentence description — added by the summarization step |
 
 ---
 
