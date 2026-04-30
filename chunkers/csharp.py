@@ -91,6 +91,7 @@ def chunk_file(path: Path, repo_root: Path) -> list[Chunk]:
                         src,
                         path,
                         repo_root,
+                        language="csharp",
                     )
                 )
                 return
@@ -121,6 +122,7 @@ def chunk_file(path: Path, repo_root: Path) -> list[Chunk]:
                     src,
                     path,
                     repo_root,
+                    language="csharp",
                 )
             )
             return

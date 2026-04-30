@@ -26,15 +26,57 @@ load_dotenv()
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 
-SYSTEM_PROMPT = """Você é um assistente que responde perguntas sobre um código C# fornecido como contexto.
+_SYSTEM_PROMPTS: dict[str, str] = {
+    "csharp": (
+        "Você é um assistente especialista em C# e .NET que responde perguntas sobre o código fornecido como contexto.\n\n"
+        "Regras estritas:\n"
+        "1. Use APENAS os trechos de código fornecidos abaixo. Não invente nomes de classes, métodos ou arquivos.\n"
+        "2. Se a resposta não estiver nos trechos, diga exatamente: \"Não encontrado nos trechos fornecidos.\"\n"
+        "3. Sempre cite o arquivo e o intervalo de linhas ao referenciar código, no formato `caminho/arquivo.cs:linha`.\n"
+        "4. Quando relevante, mostre o nome completo do método ou classe (ex.: `DeleteTodoItemCommandHandler.Handle`).\n"
+        "5. Responda em português, de forma técnica e direta."
+    ),
+    "typescript": (
+        "Você é um assistente especialista em TypeScript e Node.js/browser que responde perguntas sobre o código fornecido como contexto.\n\n"
+        "Regras estritas:\n"
+        "1. Use APENAS os trechos de código fornecidos abaixo. Não invente nomes de funções, classes, interfaces ou arquivos.\n"
+        "2. Se a resposta não estiver nos trechos, diga exatamente: \"Não encontrado nos trechos fornecidos.\"\n"
+        "3. Sempre cite o arquivo e o intervalo de linhas ao referenciar código, no formato `caminho/arquivo.ts:linha`.\n"
+        "4. Quando relevante, mostre o nome completo da função, classe ou tipo (ex.: `UserService.findById`).\n"
+        "5. Responda em português, de forma técnica e direta."
+    ),
+    "javascript": (
+        "Você é um assistente especialista em JavaScript que responde perguntas sobre o código fornecido como contexto.\n\n"
+        "Regras estritas:\n"
+        "1. Use APENAS os trechos de código fornecidos abaixo. Não invente nomes de funções, classes ou arquivos.\n"
+        "2. Se a resposta não estiver nos trechos, diga exatamente: \"Não encontrado nos trechos fornecidos.\"\n"
+        "3. Sempre cite o arquivo e o intervalo de linhas ao referenciar código, no formato `caminho/arquivo.js:linha`.\n"
+        "4. Quando relevante, mostre o nome completo da função ou classe (ex.: `UserService.findById`).\n"
+        "5. Responda em português, de forma técnica e direta."
+    ),
+    "terraform": (
+        "Você é um assistente especialista em Terraform e infraestrutura como código (IaC) que responde perguntas sobre a configuração HCL fornecida como contexto.\n\n"
+        "Regras estritas:\n"
+        "1. Use APENAS os trechos de configuração fornecidos abaixo. Não invente nomes de recursos, módulos ou variáveis.\n"
+        "2. Se a resposta não estiver nos trechos, diga exatamente: \"Não encontrado nos trechos fornecidos.\"\n"
+        "3. Sempre cite o arquivo ao referenciar configuração, no formato `caminho/arquivo.tf:linha`.\n"
+        "4. Quando relevante, mostre o identificador completo do recurso (ex.: `aws_s3_bucket.my_bucket`).\n"
+        "5. Responda em português, de forma técnica e direta."
+    ),
+}
 
-Regras estritas:
-1. Use APENAS os trechos de código fornecidos abaixo. Não invente nomes de classes, métodos ou arquivos.
-2. Se a resposta não estiver nos trechos, diga exatamente: "Não encontrado nos trechos fornecidos."
-3. Sempre cite o arquivo e o intervalo de linhas ao referenciar código, no formato `caminho/arquivo.cs:linha`.
-4. Quando relevante, mostre o nome completo do método ou classe (ex.: `DeleteTodoItemCommandHandler.Handle`).
-5. Responda em português, de forma técnica e direta.
-"""
+# Fallback para chunks sem campo language (indexados antes da migração)
+_DEFAULT_SYSTEM_PROMPT = _SYSTEM_PROMPTS["csharp"]
+
+
+def _detect_language(hits, override: str | None = None) -> str:
+    if override:
+        return override.lower().strip()
+    for hit in hits:
+        lang = (hit.payload or {}).get("language", "")
+        if lang:
+            return lang
+    return "csharp"
 
 
 def _estimate_tokens(text: str) -> int:
@@ -55,7 +97,8 @@ def build_prompt(question: str, hits, max_ctx: int | None = None) -> tuple[str, 
             f"[Trecho {i}] {p.get('file_path')}:{p.get('start_line')}-{p.get('end_line')}  "
             f"(símbolo: {p.get('symbol')}, tipo: {p.get('kind')})"
         )
-        block = f"{header}\n```csharp\n{p.get('code', '')}\n```"
+        lang = p.get("language") or "csharp"
+        block = f"{header}\n```{lang}\n{p.get('code', '')}\n```"
         cost = _estimate_tokens(block)
         if budget is not None and used + cost > budget:
             skipped += 1
@@ -89,6 +132,9 @@ def main() -> int:
                     help="Limite estimado de tokens do prompt (padrão: 3500). Use 0 para desabilitar.")
     ap.add_argument("--show-context", action="store_true",
                     help="Imprime os chunks recuperados antes da resposta")
+    ap.add_argument("--language", default=None,
+                    choices=["csharp", "typescript", "javascript", "terraform"],
+                    help="Força o system prompt para uma linguagem específica (padrão: inferido dos chunks)")
     args = ap.parse_args()
 
     if not args.collection:
@@ -118,6 +164,9 @@ def main() -> int:
                   f"({p.get('file_path')}:{p.get('start_line')}-{p.get('end_line')})")
         print("===========================\n")
 
+    language = _detect_language(hits, args.language)
+    system_prompt = _SYSTEM_PROMPTS.get(language, _DEFAULT_SYSTEM_PROMPT)
+
     max_ctx = args.max_ctx or None
     user_prompt, estimated_tokens = build_prompt(args.question, hits, max_ctx)
     if max_ctx:
@@ -126,7 +175,7 @@ def main() -> int:
     stream = llm_client.chat.completions.create(
         model=args.llm_model,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
         stream=True,

@@ -28,6 +28,7 @@ class Chunk:
     start_line: int
     end_line: int
     content_hash: str
+    language: str = ""
 
 
 # ── AST helpers ────────────────────────────────────────────────────────────────
@@ -54,6 +55,8 @@ def _extract_name(node: Node, src: bytes) -> str:
 def _extract_signature(node: Node, src: bytes) -> str:
     body = (
         _find_child(node, "block")
+        or _find_child(node, "statement_block")        # JS/TS function bodies
+        or _find_child(node, "class_body")             # JS/TS class declarations
         or _find_child(node, "arrow_expression_clause")
         or _find_child(node, "declaration_list")
         or node.child_by_field_name("body")
@@ -88,6 +91,7 @@ def _make_chunk(
     src: bytes,
     path: Path,
     repo_root: Path,
+    language: str = "",
 ) -> Chunk:
     code_start = _collect_leading_comments(node)
     raw_code = src[code_start : node.end_byte].decode("utf-8", errors="replace")
@@ -117,4 +121,5 @@ def _make_chunk(
         start_line=node.start_point[0] + 1,
         end_line=node.end_point[0] + 1,
         content_hash=content_hash,
+        language=language,
     )

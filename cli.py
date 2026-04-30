@@ -24,7 +24,7 @@ from pathlib import Path
 
 
 # ── Supported languages (shown as choices in the interactive prompt) ──────────
-_SUPPORTED_LANGUAGES = ["csharp"]
+_SUPPORTED_LANGUAGES = ["csharp", "javascript", "terraform", "typescript"]
 
 
 def _ask_missing(args: argparse.Namespace) -> argparse.Namespace:

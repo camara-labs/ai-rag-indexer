@@ -7,9 +7,9 @@ Usage:
 
 Supported languages:
     - "csharp"
-
-Future languages (not yet implemented):
-    - "nodejs" / "typescript"
+    - "typescript"
+    - "javascript"
+    - "terraform"
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from pathlib import Path
 
 from chunkers.base import Chunk
 
-_SUPPORTED = ("csharp",)
+_SUPPORTED = ("csharp", "javascript", "terraform", "typescript")
 
 
 def chunk_repo(language: str, repo_path: Path) -> list[Chunk]:
@@ -28,7 +28,8 @@ def chunk_repo(language: str, repo_path: Path) -> list[Chunk]:
     Parameters
     ----------
     language:
-        Source language to parse. Currently only ``"csharp"`` is supported.
+        Source language to parse. Supported: ``"csharp"``, ``"typescript"``,
+        ``"javascript"``, ``"terraform"``.
     repo_path:
         Absolute path to the root of the repository to scan.
 
@@ -45,8 +46,20 @@ def chunk_repo(language: str, repo_path: Path) -> list[Chunk]:
     lang = language.lower().strip()
 
     if lang == "csharp":
-        from chunkers.csharp import chunk_repo as _csharp_chunk_repo
-        return _csharp_chunk_repo(repo_path)
+        from chunkers.csharp import chunk_repo as _impl
+        return _impl(repo_path)
+
+    if lang == "typescript":
+        from chunkers.typescript import chunk_repo as _impl
+        return _impl(repo_path)
+
+    if lang == "javascript":
+        from chunkers.javascript import chunk_repo as _impl
+        return _impl(repo_path)
+
+    if lang == "terraform":
+        from chunkers.terraform import chunk_repo as _impl
+        return _impl(repo_path)
 
     raise ValueError(
         f"Unsupported language: {language!r}. "

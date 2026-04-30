@@ -45,7 +45,7 @@ _USER_TEMPLATE = """\
 Signature: {signature}
 File: {file_path}
 
-```csharp
+```{language}
 {code}
 ```
 """
@@ -58,6 +58,7 @@ def _build_user_message(chunk: dict) -> str:
         namespace=chunk.get("namespace", ""),
         signature=chunk.get("signature", ""),
         file_path=chunk.get("file_path", ""),
+        language=chunk.get("language") or "csharp",
         code=chunk.get("code", ""),
     )
 
