@@ -1,373 +1,375 @@
-# Indexer — Etapa 1: Chunking semântico de C#
+# RAG Indexer — Multi-Language Code Search Pipeline
 
-Este módulo lê um diretório com código C# e produz um arquivo **JSONL** onde cada linha é um "pedaço" (chunk) coerente do código — um método, propriedade, construtor ou classe pequena — com metadados estruturais.
-
-Esta é a **primeira de três etapas** do pipeline de RAG:
+A semantic chunking and indexing pipeline that turns source code repositories into a searchable vector database. Query your codebase in natural language and get precise, cited answers from an LLM.
 
 ```
-[1] Chunking      ← VOCÊ ESTÁ AQUI   produz chunks.jsonl
-[2] Embedding         (próxima etapa) produz vetores
-[3] Indexação Qdrant  (próxima etapa) faz upsert no banco
+[1] Chunking  →  [2] Embedding  →  [3] Qdrant Storage  →  [4] RAG Query
 ```
 
-Manter as etapas separadas permite trocar o modelo de embedding sem reparsear o código, inspecionar os chunks antes de indexar, e versionar o JSONL.
+Keeping the stages separate means you can swap the embedding model without re-parsing, inspect chunks before indexing, and version the JSONL output.
 
 ---
 
-## Por que chunking semântico (e não por linhas)
+## Supported Languages
 
-Cortar código a cada N linhas quebra métodos no meio, perde o nome da classe e mistura `using`s com lógica. O resultado é que o embedding fica genérico e o retrieval traz lixo.
-
-Aqui usamos **Tree-sitter** para parsear o C# em uma árvore sintática (AST) e extrair unidades inteiras:
-
-- Cada **método**, **construtor** e **propriedade** vira um chunk.
-- **Classes pequenas** (≤60 linhas — DTOs, records, enums) ficam inteiras em um único chunk.
-- **Classes grandes** são quebradas membro a membro.
-- Cada chunk leva no topo um **header de contexto** com `// File:`, `// Namespace:`, `// Class:` e os `using`s do arquivo — isso é o que permite ao embedding distinguir `Save()` de `OrderRepository` do `Save()` de `UserRepository`.
-- **Comentários XML doc** (`/// <summary>`) imediatamente acima de um membro são incluídos no chunk dele.
+| Language | Extensions | Chunk types |
+|---|---|---|
+| **C#** | `.cs` | method, constructor, property, class |
+| **TypeScript** | `.ts`, `.tsx` | function, class, method, constructor, interface, type |
+| **JavaScript** | `.js`, `.jsx` | function, class, method, constructor |
+| **Terraform** | `.tf` | resource, data, module, variable, output, locals, provider |
 
 ---
 
-## Pré-requisitos
+## Why Semantic Chunking
 
-- Python 3.12+ (incluindo 3.14)
-- Pip
+Splitting code every N lines breaks methods in half, loses class context, and mixes imports with logic. The resulting embedding is generic and retrieval returns noise.
 
-Não precisa compilar nada — `tree-sitter-c-sharp` já vem com o parser pré-buildado.
+This pipeline uses **Tree-sitter** to parse source code into an AST and extract complete semantic units:
+
+- Each **method, function, constructor, and property** becomes its own chunk.
+- **Small classes** (≤ 60 lines — DTOs, records, interfaces, enums) are kept as a single chunk.
+- **Large classes** are broken down member by member.
+- Each chunk carries a **context header** with `// File:`, `// Namespace:`, `// Class:`, and the file-level imports — this is what lets the embedding distinguish `Save()` in `OrderRepository` from `Save()` in `UserRepository`.
+- **Leading doc comments** (XML `///`, JSDoc `/** */`) immediately above a member are included in its chunk.
+- Terraform chunks carry the full block (`resource "aws_s3_bucket" "my_bucket" { ... }`) as a single unit.
 
 ---
 
-## Instalação
+## Requirements
 
-A partir da raiz do projeto:
+- Python 3.12+
+- Qdrant (via Docker)
+- An OpenAI-compatible embedding server (Ollama, LM Studio, vLLM, llama.cpp)
+- An OpenAI-compatible LLM server (same options)
+
+---
+
+## Installation
 
 ```bash
 cd indexer
-C:/python/python.exe -m venv .venv
-# Windows (bash):
-source .venv/Scripts/activate
-# (ou no PowerShell: .venv\Scripts\Activate.ps1)
+
+# Create and activate a virtual environment
+python -m venv .venv
+source .venv/Scripts/activate        # Windows (bash)
+# or: .venv\Scripts\Activate.ps1    # Windows (PowerShell)
+# or: source .venv/bin/activate     # macOS / Linux
 
 pip install -r requirements.txt
 ```
 
-Se o `py -3.12` falhar no Windows com erro de caminho inexistente, use o executavel Python que realmente existe no sistema (ex.: `C:/python/python.exe`):
+Copy `.env.example` to `.env` and fill in your values:
 
 ```bash
-C:/python/python.exe -m venv .venv
+cp .env.example .env
 ```
 
-## Erro comum no Windows (`tree-sitter`)
+```dotenv
+OPENAI_BASE_URL=http://localhost:1234/v1   # embedding server
+OPENAI_API_KEY=lm-studio                   # any string for local servers
+EMBED_MODEL=text-embedding-bge-m3
 
-Se aparecer `Building wheel for tree-sitter ... Microsoft Visual C++ 14.0 or greater is required`, normalmente voce esta com versoes antigas de dependencias em `requirements.txt` (sem wheel compativel) ou um ambiente inconsistente.
+LLM_BASE_URL=http://localhost:1234/v1      # chat/LLM server (can be the same)
+LLM_MODEL=qwen3-4b
 
-Resolucao recomendada:
+QDRANT_URL=http://localhost:6333
+```
+
+Start Qdrant:
 
 ```bash
-deactivate
-Remove-Item -Recurse -Force .venv
-C:/python/python.exe -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+docker compose up -d
 ```
-
-Alternativa: instalar o Build Tools do Visual C++, mas para este projeto o ideal e usar as versoes atuais do `requirements.txt`.
 
 ---
 
-## Uso
+## Full Pipeline — Interactive CLI
+
+The easiest way to run the full pipeline (chunk → embed → store):
 
 ```bash
-python chunker.py <diretório_código> <arquivo_saída.jsonl>
+python cli.py
 ```
 
-Exemplo, indexando o `CleanArchitecture` que já está no repo:
+Languages are **auto-detected** by scanning the repository for known file extensions — no language prompt. A repository with TypeScript and Terraform files will index both automatically.
+
+You will be prompted for:
+1. **Repository path** — absolute path to the directory to index
+2. **Collection name** — Qdrant collection name
+3. **JSONL output path** — intermediate chunk file (defaults to `chunks/<collection>.jsonl`)
+4. **Embedding model** — defaults to `EMBED_MODEL` from `.env`
+
+The confirmation screen shows which languages were detected before proceeding:
+
+```
+  Languages  : typescript, terraform (auto-detected)
+  Repo path  : /home/user/my-infra-app
+  Collection : my_infra_app
+  ...
+Proceed with indexing? [Y/n]
+```
+
+All prompts can be bypassed with flags for scripted use:
 
 ```bash
-python chunker.py ../codebase/CleanArchitecture chunks/clean-arch.jsonl
+python cli.py \
+  --repo-path /abs/path/to/my-app \
+  --collection my_app \
+  --yes
 ```
 
-Saída esperada no console:
+Use `--language` to restrict indexing to a single language when needed:
 
+```bash
+python cli.py \
+  --repo-path /abs/path/to/my-app \
+  --collection my_app_ts \
+  --language typescript \
+  --yes
 ```
-Parsed 142 files, produced 873 chunks -> chunks/clean-arch.jsonl
-```
-
-Pastas `bin/`, `obj/`, `.git/`, `node_modules/` e `packages/` são ignoradas automaticamente.
 
 ---
 
-## Formato do JSONL
+## Individual Pipeline Stages
 
-Cada linha é um JSON com a estrutura:
+### Stage 1 — Chunking
+
+Parse a repository and write a JSONL of semantic chunks. Languages are auto-detected:
+
+```bash
+python chunker.py /path/to/repo chunks/my-app.jsonl
+```
+
+Restrict to a single language when needed:
+
+```bash
+python chunker.py /path/to/repo chunks/my-app.jsonl --language typescript
+```
+
+Options:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--language` | auto-detect | Restrict to one language |
+| `--max-chunk-chars N` | no limit | Skip chunks larger than N characters |
+| `--top-large N` | 5 | Print the N largest chunks (inspection) |
+
+Automatically skipped paths per language:
+
+| Language | Skipped directories | Skipped files |
+|---|---|---|
+| C# | `bin/`, `obj/`, `Migrations/` | `*.Designer.cs`, `*.g.cs`, `AssemblyInfo.cs` |
+| TypeScript | `node_modules/`, `dist/`, `.next/`, `coverage/` | `*.d.ts` |
+| JavaScript | `node_modules/`, `dist/`, `.next/`, `coverage/` | `*.min.js` |
+| Terraform | `.terraform/` | `*.tfstate`, `*.tfstate.backup` |
+
+### Stage 2 — Embedding
+
+Embed the chunks and add a `"vector"` field to each:
+
+```bash
+python embedder.py chunks/my-app.jsonl \
+  --model text-embedding-bge-m3 \
+  --output chunks/my-app-embedded.jsonl
+```
+
+### Stage 3 — Storage
+
+Upsert embedded chunks into Qdrant (incremental — skips already-indexed hashes):
+
+```bash
+python storer.py chunks/my-app-embedded.jsonl --collection my_app_ts
+```
+
+---
+
+## Querying
+
+Ask a question in natural language. The system embeds the question, retrieves the top-K most relevant chunks, and streams an LLM answer:
+
+```bash
+python ask.py "how does authentication work?" --collection my_app_ts
+```
+
+The language is inferred from the retrieved chunks' `language` field — the appropriate system prompt is selected automatically. You can also force a language:
+
+```bash
+python ask.py "which resources create S3 buckets?" \
+  --collection infra_tf \
+  --language terraform
+```
+
+Options:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--collection` | prompted | Qdrant collection to query |
+| `--k N` | 5 | Number of chunks to retrieve |
+| `--language` | auto (from chunks) | Force a specific system prompt |
+| `--embed-model` | `EMBED_MODEL` env | Embedding model |
+| `--llm-model` | `LLM_MODEL` env | Chat model |
+| `--show-context` | off | Print retrieved chunks before the answer |
+| `--max-ctx N` | 3500 | Token budget for the prompt |
+| `--temperature` | 0.2 | LLM temperature |
+
+Each language has a dedicated system prompt that gives the LLM the right domain context (C#/.NET, TypeScript/Node, JavaScript, Terraform/IaC).
+
+---
+
+## Summarization (Optional)
+
+Add LLM-generated summaries to each chunk for richer retrieval:
+
+```bash
+python summarizer.py chunks/my-app.jsonl --model qwen3-4b
+```
+
+Writes to `chunks/my-app-summarized.jsonl`. Supports checkpoint resumption — safe to interrupt and restart. The code block language in the prompt is inferred automatically from each chunk's `language` field.
+
+Options:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--output` | `<input>-summarized.jsonl` | Output path |
+| `--model` | `LLM_MODEL` env | Chat model to use |
+| `--max-tokens N` | 4096 | Max tokens per summary |
+| `--skip-existing` | off | Skip chunks that already have a `summary` field |
+
+---
+
+## JSONL Schema
+
+Each line is a JSON object:
 
 ```json
 {
-  "code": "// File: src/Auth/AuthService.cs\n// Namespace: MyApp.Auth\n// Class: AuthService\nusing System;\nusing Microsoft.IdentityModel.Tokens;\n\n/// <summary>Valida JWT...</summary>\npublic bool ValidateToken(string jwt) { ... }",
-  "file_path": "src/Auth/AuthService.cs",
-  "namespace": "MyApp.Auth",
-  "class_name": "AuthService",
-  "symbol": "AuthService.ValidateToken",
-  "kind": "method",
-  "signature": "public bool ValidateToken(string jwt)",
-  "imports": ["using System;", "using Microsoft.IdentityModel.Tokens;"],
-  "start_line": 42,
-  "end_line": 58,
-  "content_hash": "a3f1c2..."
+  "code":         "// File: src/auth/AuthService.ts\n// Class: AuthService\nimport { Injectable } ...\n\nasync findById(id: string): Promise<User> { ... }",
+  "file_path":    "src/auth/AuthService.ts",
+  "namespace":    "auth",
+  "class_name":   "AuthService",
+  "symbol":       "AuthService.findById",
+  "kind":         "method",
+  "signature":    "async findById(id: string): Promise<User>",
+  "imports":      ["import { Injectable } from '@angular/core';"],
+  "start_line":   24,
+  "end_line":     30,
+  "content_hash": "a3f1c2d4...",
+  "language":     "typescript"
 }
 ```
 
-Campos importantes:
+Key fields:
 
-| Campo          | Para que serve depois |
-|----------------|---|
-| `code`         | Texto que vai virar embedding e ir para o prompt do LLM |
-| `symbol`       | Identificador único do membro — útil para deduplicar e exibir |
-| `kind`         | `method` / `constructor` / `property` / `class` — útil para filtros no Qdrant |
-| `file_path`, `start_line`, `end_line` | "Abrir no editor" e expandir contexto com vizinhos |
-| `content_hash` | Indexação incremental — só re-embeda chunks alterados |
-
----
-
-## Inspecionando o resultado
-
-Conte chunks por tipo:
-
-```bash
-python -c "import json; from collections import Counter; print(Counter(json.loads(l)['kind'] for l in open('chunks/clean-arch.jsonl', encoding='utf-8')))"
-```
-
-Veja o primeiro chunk formatado:
-
-```bash
-python -c "import json; print(json.dumps(json.loads(open('chunks/clean-arch.jsonl', encoding='utf-8').readline()), indent=2, ensure_ascii=False))"
-```
-
-Olhe alguns chunks à mão antes de seguir para o embedding. Se algum método importante foi cortado errado, é aqui que você descobre — e barato.
-
----
-
-## Limitações conhecidas (e quando se importar)
-
-- **Métodos enormes (>800 tokens)** não são sub-divididos. Se você tiver muitos, adicionamos um splitter na etapa 2 antes de embedar.
-- **Não resolve referências de tipos.** Para isso seria necessário Roslyn (análise semântica). Por ora, a expansão de contexto será feita por proximidade no arquivo, no momento do retrieval.
-- **Top-level statements** (programas sem classe) não são extraídos como chunk separado — caem como filhos do root e são ignorados. Aceitável para a maioria dos projetos.
-
----
-
----
-
-# Etapa 2 — Embeddings + Qdrant
-
-## Pré-requisitos
-
-1. **Qdrant rodando** (a partir da raiz do repo):
-
-   ```bash
-   docker compose up -d
-   ```
-
-   Confirme acessando http://localhost:6333/dashboard.
-
-2. **Modelo de embedding no Ollama** — use `bge-m3`:
-
-   ```bash
-   ollama pull bge-m3
-   ```
-
-   1024 dimensões, multilíngue (PT-BR + EN), 567M parâmetros, roda rápido em CPU. **Não use `nomic-embed-text`** para esse projeto — ver "Lições aprendidas" abaixo.
-
-3. As novas dependências Python já estão em `requirements.txt`:
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## Indexar os chunks
-
-```bash
-python index_chunks.py chunks/clean-arch.jsonl --model bge-m3 --collection csharp_code_bgem3
-```
-
-O que acontece:
-
-1. Detecta automaticamente a dimensão do modelo (sondagem inicial).
-2. Cria a coleção `csharp_code` no Qdrant se não existir, com índices de payload em `file_path`, `namespace`, `kind`, `symbol`, `content_hash`.
-3. Lê todos os `content_hash` já indexados (se existirem) — **indexação incremental**, só re-embeda chunks novos ou alterados.
-4. Para cada chunk, chama o Ollama para gerar o embedding e faz upsert no Qdrant com o JSON inteiro como payload.
-
-Saída esperada:
-
-```
-Sondando dimensão do modelo bge-m3...
-  dim = 1024
-Lendo hashes já indexados...
-  0 chunks já no Qdrant
-Total: 157 chunks no JSONL, 157 novos para indexar
-Embedding: 100%|██████████| 157/157 [00:19<00:00,  7.98it/s]
-Concluído. Coleção 'csharp_code_bgem3' agora tem 157 pontos.
-```
-
-Reexecutar o comando depois deve dizer "Nada novo" — isso prova que o incremental funciona.
-
-## Buscar
-
-```bash
-python search.py "como deletar um TodoItem do banco?" --collection csharp_code_bgem3 --model bge-m3
-```
-
-> ⚠️ **Importante**: o `--model` da busca **precisa ser o mesmo** usado na indexação. Vetores de modelos diferentes não são comparáveis (e dimensões diferentes nem sequer cabem na mesma coleção). Hoje isso é manual; uma melhoria futura é gravar o modelo nos metadados da coleção.
-
-Saída esperada (top 5 por similaridade de cosseno):
-
-```
-#1  score=0.6283  class  DeleteTodoItemCommandHandler
-    src/Application/TodoItems/Commands/DeleteTodoItem/DeleteTodoItem.cs:7-28
-    namespace: CleanArchitecture.Application.TodoItems.Commands.DeleteTodoItem
-    signature: public class DeleteTodoItemCommandHandler : IRequestHandler<DeleteTodoItemCommand>
-
-#2  score=0.6168  class  CreateTodoItemCommandHandler
-    ...
-```
-
-Filtrar por tipo (só métodos):
-
-```bash
-python search.py "validar token JWT" --collection csharp_code_bgem3 --model bge-m3 --kind method
-```
-
----
-
-## Lições aprendidas (ordem importa)
-
-Esta seção registra os erros reais que cometemos ao montar a Etapa 2 e por que as escolhas atuais são as escolhas atuais. Leia antes de "otimizar" qualquer coisa aqui.
-
-### 1. `nomic-embed-text` é ruim para código
-
-Foi nosso primeiro modelo (porque é o default em vários tutoriais de RAG). Resultado das três queries de teste com a coleção indexada por ele:
-
-| Query | DeleteTodoItemCommandHandler aparece? |
+| Field | Purpose |
 |---|---|
-| `"como deletar um TodoItem do banco?"` (PT-BR) | ❌ não no top 5 — top 1 era `ForbiddenAccessException` |
-| `"delete todo item from database"` (EN) | ❌ não no top 5 — top 1 era `TodoItemCompletedEvent` |
-| `"Remove SaveChangesAsync TodoItems"` (lexical) | ❌ idem |
+| `code` | Text that becomes the embedding and goes into the LLM prompt |
+| `language` | Source language — used for system prompt selection and code block syntax highlighting |
+| `symbol` | Fully-qualified member name — useful for deduplication and display |
+| `kind` | `method` / `function` / `constructor` / `property` / `class` / `interface` / `type` / `resource` / `variable` / ... |
+| `file_path`, `start_line`, `end_line` | "Open in editor" navigation and neighbour-context expansion |
+| `content_hash` | Incremental indexing — only re-embeds changed chunks |
 
-**Por que falhou:**
+---
 
-- `nomic-embed-text` é treinado em **texto natural em inglês**. Ele "vê" `_context.TodoItems.Remove(entity)` como string opaca, sem entender que isso é "deletar item".
-- É **monolíngue** (inglês). Queries em PT-BR ficam num espaço vetorial diferente do código.
+## Inspecting Chunks
 
-### 2. `bge-m3` resolveu os dois problemas
+Count by type:
 
-Mesma indexação, mesmo retrieval, mesmas três queries:
+```bash
+python -c "
+import json
+from collections import Counter
+rows = [json.loads(l) for l in open('chunks/my-app.jsonl', encoding='utf-8')]
+print(Counter((r['language'], r['kind']) for r in rows))
+"
+```
 
-| Query | Top 1 |
-|---|---|
-| `"como deletar um TodoItem do banco?"` | ✅ `DeleteTodoItemCommandHandler` (score 0.628) |
-| `"delete todo item from database"` | ✅ `DeleteTodoItemCommandHandler` (score 0.635) |
-| `"Remove SaveChangesAsync TodoItems"` | ✅ `DeleteTodoItemCommandHandler` (score 0.606) |
+Print the first chunk formatted:
 
-**Por que `bge-m3`:**
+```bash
+python -c "
+import json
+print(json.dumps(json.loads(open('chunks/my-app.jsonl', encoding='utf-8').readline()), indent=2))
+"
+```
 
-- Multilíngue de verdade (inclui PT-BR no treinamento).
-- Mix de treinamento incluiu código.
-- 1024 dims, 567M params — CPU dá conta tranquilo.
-- Suporta dense + sparse no mesmo modelo, o que abre caminho para *hybrid search* sem trocar de modelo depois.
+Inspect the AST of a single file (useful when tuning a chunker):
 
-### 3. Dimensão do modelo é um contrato com a coleção
+```bash
+python inspect_ast.py path/to/file.cs
+```
 
-Coleção `csharp_code` foi criada com 768 dims (nomic). Coleção `csharp_code_bgem3` foi criada com 1024 dims (bge-m3). **Não dá para misturar** — uma busca com vetor de 1024 numa coleção de 768 dá erro, e vice-versa.
+**Always review a sample of chunks before embedding.** If an important method was split wrong or a block is missing context, this is where you find it — cheaply.
 
-Convenção que estamos seguindo:
-- Nome da coleção carrega o modelo: `csharp_code_bgem3`.
-- Mantemos a coleção antiga (`csharp_code` com nomic) viva para comparar lado a lado se quiser. Não custa nada — é só um pouco de disco.
+---
 
-Quando trocar de modelo no futuro, **crie nova coleção**, indexe nela, compare com a antiga, e só depois apague a antiga se a nova for melhor. Reindexar in-place é tentação ruim.
+## Project Structure
 
-### 4. Diagnóstico de retrieval ruim — três queries, não uma
+```
+indexer/
+├── cli.py              # Interactive full-pipeline CLI
+├── pipeline.py         # Programmatic pipeline orchestrator
+├── chunker.py          # Standalone chunking CLI
+├── embedder.py         # Stage 2: add vectors to chunks
+├── storer.py           # Stage 3: upsert to Qdrant
+├── ask.py              # RAG query with streaming LLM answer
+├── summarizer.py       # Optional: add LLM summaries to chunks
+├── chat.py             # Multi-turn conversational RAG
+├── llm_client.py       # Shared OpenAI-compatible client factory
+├── chunkers/
+│   ├── __init__.py     # Language dispatcher
+│   ├── base.py         # Chunk dataclass + shared AST helpers
+│   ├── csharp.py       # C# chunker (tree-sitter-c-sharp)
+│   ├── typescript.py   # TypeScript/TSX chunker (tree-sitter-typescript)
+│   ├── javascript.py   # JavaScript/JSX chunker (tree-sitter-javascript)
+│   └── terraform.py    # Terraform/HCL chunker (tree-sitter-hcl)
+├── chunks/             # Intermediate JSONL files
+├── sessions/           # Chat session histories
+├── plans/              # Implementation planning documents
+└── requirements.txt
+```
 
-Quando o RAG está retornando lixo, rode estas três queries para isolar a causa antes de mudar qualquer coisa:
+---
 
-1. **Query natural no idioma do usuário** (PT-BR aqui).
-2. **A mesma query traduzida** para o idioma do código (EN).
-3. **Uma query lexical** com termos que aparecem literalmente no código (`Remove`, `SaveChangesAsync`).
+## Adding a New Language
 
-Mapeamento:
+1. **Create `chunkers/<language>.py`**
+   - Implement `chunk_file(path, repo_root) -> list[Chunk]` using the appropriate `tree-sitter-<language>` parser
+   - Implement `iter_<ext>_files(root)` with the right skip rules
+   - Implement `chunk_repo(repo_path) -> list[Chunk]`
+   - Pass `language="<language>"` to every `_make_chunk()` call
 
-| Falha em... | Causa provável | Solução |
+2. **Register in `chunkers/__init__.py`**
+   - Add to `_SUPPORTED` tuple
+   - Add an `if lang == "<language>"` branch
+
+3. **Add to `cli.py`**
+   - Add to `_SUPPORTED_LANGUAGES`
+
+4. **Add a system prompt to `ask.py`**
+   - Add an entry to `_SYSTEM_PROMPTS` with domain-appropriate instructions
+
+5. **Add the parser package to `requirements.txt`**
+
+---
+
+## Embedding Model Recommendations
+
+| Model | Dims | Notes |
 |---|---|---|
-| Só PT-BR | Modelo monolíngue | Trocar por modelo multilíngue |
-| PT-BR e EN | Modelo não entende código | Trocar por modelo code-aware |
-| As três | Embedding ruim **ou** chunking ruim | Inspecionar chunks antes do embedding |
-| Só lexical | Embeddings dense puros bastam | Não precisa hybrid; ignore |
-| Lexical mas não semântico | Embeddings ruins, hybrid não resolve | Trocar modelo de embedding |
+| `text-embedding-bge-m3` | 1024 | **Recommended.** Multilingual (PT-BR + EN), code-aware, supports hybrid search. |
+| `nomic-embed-text` | 768 | English-only, poor on code. Retrieval quality degrades significantly for non-English queries. |
 
-### 5. O que **não** consertamos ainda (por ser desnecessário no momento)
+**Important:** the embedding model is a contract with the Qdrant collection. A collection created with 1024-dim vectors cannot accept 768-dim vectors. When switching models, create a new collection — do not reindex in place.
 
-- **Hybrid search (dense + BM25)**: bge-m3 puro já passa as três queries. Adicionar BM25 só compensa se medirmos casos onde dense falha — não é um "sempre faça".
-- **Reranker**: idem. Modelos pequenos *gostariam* de reranker, mas para 157 chunks e queries específicas o ganho é marginal. Adicionar quando o LLM começar a alucinar por causa de chunks irrelevantes no contexto.
-- **Validação automática modelo↔coleção**: hoje você precisa lembrar de passar `--model bge-m3`. Bug latente: passar modelo errado pode dar 404 (Ollama) ou erro de dimensão (Qdrant). Vai entrar como melhoria pequena depois.
+Naming convention used in this project: `<codebase>_<model>`, e.g. `clean_arch_bgem3`. This makes the model explicit in every query command and allows keeping old collections for side-by-side comparison.
 
 ---
 
-# Etapa 3 — LLM no loop
+## Known Limitations
 
-## Pré-requisitos
-
-- Etapas 1 e 2 concluídas.
-- Um LLM para código no Ollama, por exemplo:
-
-  ```bash
-  ollama pull qwen2.5-coder:7b
-  ```
-
-  Substitua por `gemma2:9b`, `codellama:7b` ou outro que você tenha. Passe via `--llm`.
-
-## Perguntar
-
-```bash
-python ask.py "como deletar um TodoItem do banco?"
-```
-
-A resposta é **streamada** no terminal token a token. O modelo recebe os 5 chunks mais relevantes e tem instrução estrita de:
-- citar `arquivo.cs:linha`
-- dizer "Não encontrado nos trechos fornecidos." se a resposta não estiver nos chunks
-- responder em PT-BR
-
-Para inspecionar o que foi recuperado antes da resposta:
-
-```bash
-python ask.py "como deletar um TodoItem do banco?" --show-context
-```
-
-Trocar o LLM:
-
-```bash
-python ask.py "..." --llm gemma2:9b
-```
-
-Mais chunks no contexto (use com cuidado, modelos 7B perdem foco):
-
-```bash
-python ask.py "explique o pipeline de validação" --k 8
-```
-
-## Ajuste fino do prompt
-
-O `SYSTEM_PROMPT` em [ask.py](ask.py) é a "cara" do assistente. Se o modelo:
-
-- **Inventa nomes de classes** → reforce "não invente, use exatamente os nomes dos trechos".
-- **Esquece de citar arquivo:linha** → adicione um exemplo de citação correta no system prompt.
-- **Responde em inglês** → adicione "Responda SEMPRE em português" no início.
-- **Divaga** → reduza `temperature` em [ask.py](ask.py) de `0.2` para `0.0`.
-
-## O que ainda NÃO temos (melhorias futuras mensuráveis)
-
-- **Hybrid search** (dense + sparse BM25): melhora retrieval quando a query usa termos exatos do código (nomes de método, flags). Qdrant suporta nativo.
-- **Reranker** (Qwen3-Reranker / bge-reranker-v2-m3): pega top-30 do retrieval e corta para top-5 — eleva precisão para LLMs pequenos.
-- **Indexação NL**: gerar uma descrição em PT-BR de cada chunk via LLM e embedar à parte; resolve queries muito abstratas.
-- **Expansão de contexto**: ao retornar um chunk, puxar automaticamente vizinhos do mesmo arquivo (método anterior + próximo) para dar mais contexto ao LLM.
-- **Re-chunk para métodos gigantes**: se algum método ultrapassar ~800 tokens, dividir antes de embedar.
-- **Validar dim do modelo vs coleção**: o `search.py`/`ask.py` deveriam ler o modelo gravado no Qdrant em vez de exigir `--model` na linha de comando.
-
-Implemente cada uma só **depois** de medir que é necessária — em projetos pequenos como esse, o pipeline atual já costuma resolver.
+- **Very large methods (> ~800 tokens)** are not sub-split. If you have many, add a token-aware splitter before embedding.
+- **Type resolution** is not performed — only syntactic structure. Semantic cross-references (e.g. "all callers of this method") require a full language server.
+- **Top-level statements** in C# (programs without a class) and bare scripts in JS/TS are not extracted as named chunks.
+- **Terraform `locals` blocks** produce a single chunk per `locals {}` block; individual local values are not split out.

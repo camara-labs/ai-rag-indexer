@@ -1,13 +1,15 @@
 """
 Semantic chunker CLI — thin wrapper around the chunkers package.
 
-Usage:
-    python chunker.py <source_dir> <output.jsonl> [--language csharp]
+Languages are auto-detected from the repository contents. Use --language
+to restrict to a single language when needed.
 
-Example:
-    python chunker.py ../codebase/CleanArchitecture chunks/clean-arch.jsonl
+Usage:
+    python chunker.py <source_dir> <output.jsonl>
+    python chunker.py <source_dir> <output.jsonl> --language typescript
 
 Flags:
+    --language            Restrict to one language (default: auto-detect all).
     --max-chunk-chars N   Skip chunks larger than N characters (default: no limit).
                           Suggested threshold: 6000. Chunks above this are almost
                           always generated code, migration files, or lookup tables.
@@ -23,7 +25,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from chunkers import chunk_repo
+from chunkers import _SUPPORTED, chunk_repo, detect_languages
 
 _WARN_THRESHOLD = 6_000   # chars — used for the warning marker in the list
 
@@ -53,8 +55,9 @@ def main() -> int:
     ap.add_argument("output", type=Path, help="Output JSONL file")
     ap.add_argument(
         "--language",
-        default="csharp",
-        help="Source language to parse (default: csharp)",
+        default=None,
+        choices=list(_SUPPORTED),
+        help="Restrict to one language (default: auto-detect all)",
     )
     ap.add_argument(
         "--max-chunk-chars",
@@ -76,11 +79,28 @@ def main() -> int:
         print(f"error: {args.source_dir} is not a directory", file=sys.stderr)
         return 1
 
-    try:
-        chunks = chunk_repo(language=args.language, repo_path=args.source_dir)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    if args.language:
+        languages = [args.language]
+    else:
+        languages = detect_languages(args.source_dir)
+        if not languages:
+            print(
+                f"error: no supported source files found in {args.source_dir}\n"
+                f"  Supported: {', '.join(_SUPPORTED)}",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"Auto-detected languages: {', '.join(languages)}")
+
+    chunks = []
+    for lang in languages:
+        try:
+            lang_chunks = chunk_repo(language=lang, repo_path=args.source_dir)
+            print(f"  [{lang}] {len(lang_chunks)} chunks")
+            chunks.extend(lang_chunks)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
     # Show large-chunk report before filtering (so the user sees what would be dropped)
     _print_large_chunks(chunks, args.top_large)

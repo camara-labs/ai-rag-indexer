@@ -1,19 +1,22 @@
 """
 Interactive CLI for the RAG indexing pipeline.
 
-Any parameter not provided as a flag is asked interactively via questionary.
+Languages are detected automatically by scanning the repository for known
+file extensions. Any parameter not provided as a flag is asked interactively.
 
 Usage (fully interactive):
     python cli.py
 
 Usage (fully scriptable, no prompts):
     python cli.py \\
-        --language csharp \\
         --repo-path /abs/path/to/repo \\
         --collection my_collection
 
-Usage (mixed — only missing flags are prompted):
-    python cli.py --language csharp
+Usage (restrict to one language):
+    python cli.py \\
+        --repo-path /abs/path/to/repo \\
+        --collection my_collection \\
+        --language typescript
 """
 
 from __future__ import annotations
@@ -22,9 +25,7 @@ import argparse
 import sys
 from pathlib import Path
 
-
-# ── Supported languages (shown as choices in the interactive prompt) ──────────
-_SUPPORTED_LANGUAGES = ["csharp", "javascript", "terraform", "typescript"]
+from chunkers import _SUPPORTED
 
 
 def _ask_missing(args: argparse.Namespace) -> argparse.Namespace:
@@ -38,14 +39,6 @@ def _ask_missing(args: argparse.Namespace) -> argparse.Namespace:
             file=sys.stderr,
         )
         sys.exit(1)
-
-    if args.language is None:
-        args.language = questionary.select(
-            "Source language:",
-            choices=_SUPPORTED_LANGUAGES,
-        ).ask()
-        if args.language is None:
-            sys.exit(0)
 
     if args.repo_path is None:
         raw = questionary.path(
@@ -89,15 +82,21 @@ def _ask_missing(args: argparse.Namespace) -> argparse.Namespace:
     return args
 
 
-def _confirm(args: argparse.Namespace) -> bool:
+def _confirm(args: argparse.Namespace, detected_languages: list[str]) -> bool:
     """Print a summary and ask for confirmation."""
     try:
         import questionary
     except ImportError:
         return True
 
+    lang_label = ", ".join(detected_languages)
+    if args.language:
+        lang_label += " (specified)"
+    else:
+        lang_label += " (auto-detected)"
+
     print()
-    print("  Language   :", args.language)
+    print("  Languages  :", lang_label)
     print("  Repo path  :", args.repo_path)
     print("  Collection :", args.collection)
     print("  JSONL path :", args.chunks_output or "(auto)")
@@ -113,15 +112,10 @@ def main() -> int:
         description="Interactive CLI for the RAG indexing pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Any missing flag will be asked interactively.\n"
+            "Languages are auto-detected from the repository contents.\n"
+            "Use --language to restrict to a single language.\n"
             "All settings are read from .env (OPENAI_BASE_URL, EMBED_MODEL, QDRANT_URL, ...)."
         ),
-    )
-    ap.add_argument(
-        "--language",
-        choices=_SUPPORTED_LANGUAGES,
-        default=None,
-        help="Source language to parse",
     )
     ap.add_argument(
         "--repo-path",
@@ -134,6 +128,12 @@ def main() -> int:
         "--collection",
         default=None,
         help="Qdrant collection name",
+    )
+    ap.add_argument(
+        "--language",
+        choices=list(_SUPPORTED),
+        default=None,
+        help="Restrict indexing to a single language (default: auto-detect all)",
     )
     ap.add_argument(
         "--chunks-output",
@@ -171,8 +171,22 @@ def main() -> int:
         print(f"error: {args.repo_path} is not a directory", file=sys.stderr)
         return 1
 
-    # Confirmation (skipped if --yes or if all args were provided via flags)
-    if not args.yes and not _confirm(args):
+    # Resolve languages: explicit flag or auto-detect
+    if args.language:
+        languages = [args.language]
+    else:
+        from chunkers import detect_languages
+        languages = detect_languages(args.repo_path)
+        if not languages:
+            print(
+                f"error: no supported source files found in {args.repo_path}\n"
+                f"  Supported: {', '.join(_SUPPORTED)}",
+                file=sys.stderr,
+            )
+            return 1
+
+    # Confirmation
+    if not args.yes and not _confirm(args, languages):
         print("Aborted.")
         return 0
 
@@ -180,9 +194,9 @@ def main() -> int:
 
     try:
         jsonl = run(
-            language=args.language,
             repo_path=args.repo_path,
             collection=args.collection,
+            languages=languages,
             chunks_output=args.chunks_output,
             embed_model=args.embed_model,
             max_chunk_chars=args.max_chunk_chars,

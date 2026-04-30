@@ -1,23 +1,31 @@
 """
 Orchestrates the full RAG indexing pipeline:
 
-    chunk_repo()  →  save JSONL  →  embed_chunks()  →  store_chunks()
+    detect_languages() / provided list
+        → chunk_repo() per language
+        → save JSONL
+        → embed_chunks()
+        → store_chunks()
 
 Usage (programmatic):
     from pathlib import Path
     from pipeline import run
 
     jsonl_path = run(
-        language="csharp",
         repo_path=Path("/path/to/repo"),
         collection="my_collection",
     )
 
 Usage (standalone):
     python pipeline.py \\
-        --language csharp \\
-        --repo-path ../codebase/CleanArchitecture \\
-        --collection csharp_clean_arch
+        --repo-path ../codebase/my-app \\
+        --collection my_app
+
+    # Restrict to a single language:
+    python pipeline.py \\
+        --repo-path ../codebase/my-app \\
+        --collection my_app \\
+        --language typescript
 """
 
 from __future__ import annotations
@@ -28,15 +36,15 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from chunkers import chunk_repo as _chunk_repo
+from chunkers import _SUPPORTED, chunk_repo as _chunk_repo, detect_languages
 from embedder import embed_chunks
 from storer import store_chunks
 
 
 def run(
-    language: str,
     repo_path: Path,
     collection: str,
+    languages: list[str] | None = None,
     chunks_output: Path | None = None,
     embed_model: str | None = None,
     max_chunk_chars: int = 0,
@@ -46,17 +54,20 @@ def run(
 
     Parameters
     ----------
-    language:
-        Source language to parse (e.g. ``"csharp"``).
     repo_path:
         Absolute path to the repository to index.
     collection:
         Qdrant collection name to upsert chunks into.
+    languages:
+        List of languages to index. If ``None`` (default), languages are
+        auto-detected by scanning the repository for known file extensions.
     chunks_output:
         Where to save the intermediate JSONL. Defaults to
-        ``chunks/<language>-<repo_name>.jsonl`` relative to the indexer dir.
+        ``chunks/<repo_name>.jsonl`` relative to the indexer directory.
     embed_model:
         Embedding model id override. Defaults to ``EMBED_MODEL`` env var.
+    max_chunk_chars:
+        Drop chunks longer than this many characters. 0 = no limit.
 
     Returns
     -------
@@ -65,36 +76,52 @@ def run(
     """
     repo_path = Path(repo_path).resolve()
 
+    # ── Language detection ────────────────────────────────────────────────────
+    if languages is None:
+        languages = detect_languages(repo_path)
+        if not languages:
+            raise ValueError(
+                f"No supported source files found in {repo_path}.\n"
+                f"Supported languages: {', '.join(_SUPPORTED)}"
+            )
+        print(f"  Auto-detected languages: {', '.join(languages)}")
+    else:
+        print(f"  Languages: {', '.join(languages)}")
+
     if chunks_output is None:
         chunks_dir = Path(__file__).parent / "chunks"
-        chunks_output = chunks_dir / f"{language}-{repo_path.name}.jsonl"
+        chunks_output = chunks_dir / f"{repo_path.name}.jsonl"
 
     # ── Step 1: Chunking ──────────────────────────────────────────────────────
-    print(f"\n[1/3] Chunking {repo_path} (language={language})...")
-    try:
-        chunks = _chunk_repo(language=language, repo_path=repo_path)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        raise
+    print(f"\n[1/3] Chunking {repo_path}...")
+    all_chunks = []
+    for lang in languages:
+        try:
+            lang_chunks = _chunk_repo(language=lang, repo_path=repo_path)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise
+        print(f"  [{lang}] {len(lang_chunks)} chunks")
+        all_chunks.extend(lang_chunks)
 
-    print(f"  Produced {len(chunks)} chunks")
+    print(f"  Total: {len(all_chunks)} chunks")
 
     if max_chunk_chars > 0:
-        before = len(chunks)
-        chunks = [ch for ch in chunks if len(ch.code) <= max_chunk_chars]
-        dropped = before - len(chunks)
+        before = len(all_chunks)
+        all_chunks = [ch for ch in all_chunks if len(ch.code) <= max_chunk_chars]
+        dropped = before - len(all_chunks)
         if dropped:
             print(f"  Filtered {dropped} chunk(s) exceeding {max_chunk_chars:,} chars")
 
     chunks_output.parent.mkdir(parents=True, exist_ok=True)
     with chunks_output.open("w", encoding="utf-8") as fh:
-        for ch in chunks:
+        for ch in all_chunks:
             fh.write(json.dumps(asdict(ch), ensure_ascii=False) + "\n")
     print(f"  Saved -> {chunks_output}")
 
     # ── Step 2: Embedding ─────────────────────────────────────────────────────
     print(f"\n[2/3] Embedding chunks (model={embed_model or 'from .env'})...")
-    raw_dicts = [asdict(ch) for ch in chunks]
+    raw_dicts = [asdict(ch) for ch in all_chunks]
     embedded = embed_chunks(raw_dicts, model=embed_model)
     print(f"  Embedded {len(embedded)} chunks")
 
@@ -108,25 +135,29 @@ def run(
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Full RAG indexing pipeline")
-    ap.add_argument("--language", default="csharp",
-                    help="Source language (default: csharp)")
-    ap.add_argument("--repo-path", type=Path, required=True,
+    ap.add_argument("--repo-path", type=Path, required=True, dest="repo_path",
                     help="Path to the repository to index")
     ap.add_argument("--collection", required=True,
                     help="Qdrant collection name")
-    ap.add_argument("--chunks-output", type=Path, default=None,
+    ap.add_argument("--language", default=None,
+                    choices=list(_SUPPORTED),
+                    help="Restrict to a single language (default: auto-detect all)")
+    ap.add_argument("--chunks-output", type=Path, default=None, dest="chunks_output",
                     help="Path for the intermediate chunks JSONL")
-    ap.add_argument("--embed-model", default=None,
+    ap.add_argument("--embed-model", default=None, dest="embed_model",
                     help="Embedding model id override")
     ap.add_argument("--max-chunk-chars", type=int, default=0, metavar="N",
+                    dest="max_chunk_chars",
                     help="Skip chunks larger than N chars. 0 = no limit. Suggested: 6000")
     args = ap.parse_args()
 
+    languages = [args.language] if args.language else None
+
     try:
         jsonl = run(
-            language=args.language,
             repo_path=args.repo_path,
             collection=args.collection,
+            languages=languages,
             chunks_output=args.chunks_output,
             embed_model=args.embed_model,
             max_chunk_chars=args.max_chunk_chars,
