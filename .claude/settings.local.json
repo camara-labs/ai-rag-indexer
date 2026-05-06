@@ -3,7 +3,12 @@
     "allow": [
       "Bash(.venv/Scripts/pip install *)",
       "Bash(.venv/Scripts/python -c ' *)",
-      "Bash(python -c \"import ast; [ast.parse\\(open\\(f, encoding='utf-8'\\).read\\(\\), f\\) for f in \\('repo_summarize.py','repo_embed.py','repo_mcp.py'\\)]; print\\('syntax OK'\\)\")"
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f, encoding='utf-8'\\).read\\(\\), f\\) for f in \\('repo_summarize.py','repo_embed.py','repo_mcp.py'\\)]; print\\('syntax OK'\\)\")",
+      "Bash(python -c \"import ast, sys; ast.parse\\(open\\('repo_summarize.py', encoding='utf-8'\\).read\\(\\), 'repo_summarize.py'\\); print\\('syntax OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe repo_summarize.py --help)",
+      "Bash(python repo_summarize.py --help)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('repo_summarize.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c ' *)"
     ]
   }
 }

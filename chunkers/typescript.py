@@ -7,6 +7,7 @@ class method, interface, type alias, or exported arrow function.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -212,3 +213,28 @@ def chunk_repo(repo_path: Path) -> list[Chunk]:
         except Exception as exc:
             print(f"warn: failed to parse {ts_file}: {exc}", file=sys.stderr)
     return chunks
+
+
+def extract_package_info(repo_path: Path) -> dict | None:
+    """Parse the root package.json and return structured dependency info.
+
+    Returns a dict with keys ``name``, ``version``, ``dependencies``,
+    ``devDependencies``, and ``peerDependencies`` (each a ``{pkg: version}``
+    mapping), or ``None`` if package.json is absent or unparseable.
+    """
+    pkg_file = Path(repo_path).resolve() / "package.json"
+    if not pkg_file.is_file():
+        return None
+    try:
+        data = json.loads(pkg_file.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {
+        "name":             data.get("name", ""),
+        "version":          data.get("version", ""),
+        "dependencies":     data.get("dependencies") or {},
+        "devDependencies":  data.get("devDependencies") or {},
+        "peerDependencies": data.get("peerDependencies") or {},
+    }

@@ -145,6 +145,7 @@ venv.bak/
 
 # Intermediate chunk artifacts
 .chunks/
+.repos/
 
 # Spyder project settings
 .spyderproject
