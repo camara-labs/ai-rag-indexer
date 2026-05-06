@@ -422,6 +422,108 @@ Naming convention used in this project: `<codebase>_<model>`, e.g. `clean_arch_b
 
 ---
 
+## Repository-Level Index (Summarize → Embed → Serve via MCP)
+
+In addition to the file-level chunking pipeline above, the indexer ships a
+second, lighter pipeline that treats **each repository as one semantic unit**
+— useful for "find me the repo that does X" lookups across many projects.
+
+Three independent commands, each reusing the existing `embedder.py`,
+`storer.py` and `llm_client.py` so there is no duplicate logic:
+
+```
+[1] repo_summarize.py  →  JSON of repo summaries
+[2] repo_embed.py      →  embed + upsert into Qdrant   (reuses embedder + storer)
+[3] repo_mcp.py        →  MCP server for semantic search
+```
+
+### Stage 1 — `repo_summarize.py`
+
+Walks one repo, a list of repos, or a parent folder (recursively discovers
+`.git` directories). For each repository, it pulls the README, top-level
+structure, and key manifests (`package.json`, `pyproject.toml`, `go.mod`,
+`Cargo.toml`, `*.csproj`, …) and asks a local LLM (configured via the
+`LLM_*` env vars) to emit a structured JSON summary.
+
+```bash
+# Single repo
+python repo_summarize.py /path/to/my-app
+
+# Parent folder containing many repos
+python repo_summarize.py /workspace --output .repos/repos.json
+
+# Mixed inputs, one file per repo
+python repo_summarize.py /a /b /c --output-dir .repos/
+```
+
+Each summary has the shape:
+
+```json
+{
+  "repository": "my-app",
+  "path": "/abs/path/my-app",
+  "summary": "...",
+  "main_technologies": ["TypeScript", "Next.js"],
+  "domain": "Web app",
+  "tags": ["frontend", "ssr"],
+  "content_hash": "..."
+}
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--output` | `.repos/repos.json` | Single JSON file with the array of summaries |
+| `--output-dir` | — | If set, one JSON file per repository |
+| `--model` | `LLM_MODEL` env | Chat model id |
+| `--base-url` | `LLM_BASE_URL` env | LLM server base URL |
+| `--max-tokens` | 768 | Max tokens per summary response |
+
+### Stage 2 — `repo_embed.py`
+
+Consumes the JSON from stage 1 and pushes each repository through the
+existing embedding/persistence pipeline. No re-implementation — only an
+adapter that maps the summary into the chunk-dict shape that
+`embedder.embed_chunks` and `storer.store_chunks` already understand
+(`kind="repository"`, `symbol=<repo name>`).
+
+```bash
+python repo_embed.py .repos/repos.json --collection repos_index
+# or, given a directory of per-repo JSON files:
+python repo_embed.py .repos/             --collection repos_index
+```
+
+Incremental: re-running skips repositories whose `content_hash` is already
+in the collection, just like the file-chunk pipeline.
+
+### Stage 3 — `repo_mcp.py`
+
+Stdio MCP server exposing one tool — `search_repositories(query, k)` — that
+embeds the query and runs a semantic search against the Qdrant collection
+populated in stage 2.
+
+```bash
+python repo_mcp.py --collection repos_index
+```
+
+Wire it into any MCP-capable client (Claude Desktop example):
+
+```json
+{
+  "mcpServers": {
+    "repo-index": {
+      "command": "python",
+      "args": ["/abs/path/to/indexer/repo_mcp.py", "--collection", "repos_index"]
+    }
+  }
+}
+```
+
+The server is intentionally generic — it returns repository summaries with
+score, path, domain, technologies and tags, leaving any tool-specific
+formatting to the client.
+
+---
+
 ## Known Limitations
 
 - **Very large methods (> ~800 tokens)** are not sub-split. If you have many, add a token-aware splitter before embedding.

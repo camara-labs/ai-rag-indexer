@@ -9,3 +9,4 @@ tqdm==4.66.5
 openai>=1.30.0
 python-dotenv>=1.0.0
 questionary>=2.0.1
+mcp>=1.0.0
