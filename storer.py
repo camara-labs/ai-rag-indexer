@@ -5,7 +5,7 @@ Reads QDRANT_URL and (optionally) QDRANT_API_KEY from the .env file.
 The collection name is always passed explicitly.
 
 Usage (standalone):
-    python storer.py chunks/clean-arch-embedded.jsonl --collection csharp_clean_arch
+    python storer.py .chunks/clean-arch-embedded.jsonl --collection csharp_clean_arch
 
 Programmatic:
     from storer import store_chunks

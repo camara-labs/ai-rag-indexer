@@ -67,7 +67,7 @@ def run(
         auto-detected by scanning the repository for known file extensions.
     chunks_output:
         Where to save the intermediate JSONL. Defaults to
-        ``chunks/<repo_name>.jsonl`` relative to the indexer directory.
+        ``.chunks/<repo_name>.jsonl`` relative to the indexer directory.
     embed_model:
         Embedding model id override. Defaults to ``EMBED_MODEL`` env var.
     max_chunk_chars:
@@ -101,7 +101,7 @@ def run(
         print(f"  Languages: {', '.join(languages)}")
 
     if chunks_output is None:
-        chunks_dir = Path(__file__).parent / "chunks"
+        chunks_dir = Path(__file__).parent / ".chunks"
         chunks_output = chunks_dir / f"{repo_path.name}.jsonl"
 
     total_steps = 4 if summarize else 3

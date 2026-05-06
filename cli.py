@@ -58,7 +58,7 @@ def _ask_missing(args: argparse.Namespace) -> argparse.Namespace:
             sys.exit(0)
 
     if args.chunks_output is None:
-        default_jsonl = f"chunks/{args.collection}.jsonl"
+        default_jsonl = f".chunks/{args.collection}.jsonl"
         raw = questionary.text(
             "Intermediate JSONL output path:",
             default=default_jsonl,

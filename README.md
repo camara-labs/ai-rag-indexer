@@ -97,7 +97,7 @@ Languages are **auto-detected** by scanning the repository for known file extens
 You will be prompted for:
 1. **Repository path** — absolute path to the directory to index
 2. **Collection name** — Qdrant collection name
-3. **JSONL output path** — intermediate chunk file (defaults to `chunks/<collection>.jsonl`)
+3. **JSONL output path** — intermediate chunk file (defaults to `.chunks/<collection>.jsonl`)
 4. **Embedding model** — defaults to `EMBED_MODEL` from `.env`
 5. **Summarization** — whether to run an LLM summarization step before embedding (default: No)
    - If yes, the LLM model is also prompted (defaults to `LLM_MODEL` from `.env`)
@@ -108,7 +108,7 @@ The confirmation screen shows the full configuration before proceeding:
   Languages  : typescript, terraform (auto-detected)
   Repo path  : /home/user/my-infra-app
   Collection : my_infra_app
-  JSONL path : chunks/my_infra_app.jsonl
+  JSONL path : .chunks/my_infra_app.jsonl
   Embed model: (from .env)
   Max chunk  : (no limit)
   Summarize  : yes (model=qwen3-4b)
@@ -164,13 +164,13 @@ python cli.py \
 Parse a repository and write a JSONL of semantic chunks. Languages are auto-detected:
 
 ```bash
-python chunker.py /path/to/repo chunks/my-app.jsonl
+python chunker.py /path/to/repo .chunks/my-app.jsonl
 ```
 
 Restrict to a single language when needed:
 
 ```bash
-python chunker.py /path/to/repo chunks/my-app.jsonl --language typescript
+python chunker.py /path/to/repo .chunks/my-app.jsonl --language typescript
 ```
 
 Options:
@@ -195,9 +195,9 @@ Automatically skipped paths per language:
 Embed the chunks and add a `"vector"` field to each:
 
 ```bash
-python embedder.py chunks/my-app.jsonl \
+python embedder.py .chunks/my-app.jsonl \
   --model text-embedding-bge-m3 \
-  --output chunks/my-app-embedded.jsonl
+  --output .chunks/my-app-embedded.jsonl
 ```
 
 ### Stage 3 — Storage
@@ -205,7 +205,7 @@ python embedder.py chunks/my-app.jsonl \
 Upsert embedded chunks into Qdrant (incremental — skips already-indexed hashes):
 
 ```bash
-python storer.py chunks/my-app-embedded.jsonl --collection my_app_ts
+python storer.py .chunks/my-app-embedded.jsonl --collection my_app_ts
 ```
 
 ---
@@ -277,10 +277,10 @@ CLI options for summarization:
 Run the summarizer on an existing JSONL independently:
 
 ```bash
-python summarizer.py chunks/my-app.jsonl --model qwen3-4b
+python summarizer.py .chunks/my-app.jsonl --model qwen3-4b
 ```
 
-Writes to `chunks/my-app-summarized.jsonl`. Supports checkpoint resumption — safe to interrupt and restart.
+Writes to `.chunks/my-app-summarized.jsonl`. Supports checkpoint resumption — safe to interrupt and restart.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -335,7 +335,7 @@ Count by type:
 python -c "
 import json
 from collections import Counter
-rows = [json.loads(l) for l in open('chunks/my-app.jsonl', encoding='utf-8')]
+rows = [json.loads(l) for l in open('.chunks/my-app.jsonl', encoding='utf-8')]
 print(Counter((r['language'], r['kind']) for r in rows))
 "
 ```
@@ -345,7 +345,7 @@ Print the first chunk formatted:
 ```bash
 python -c "
 import json
-print(json.dumps(json.loads(open('chunks/my-app.jsonl', encoding='utf-8').readline()), indent=2))
+print(json.dumps(json.loads(open('.chunks/my-app.jsonl', encoding='utf-8').readline()), indent=2))
 "
 ```
 
@@ -379,7 +379,7 @@ indexer/
 │   ├── typescript.py   # TypeScript/TSX chunker (tree-sitter-typescript)
 │   ├── javascript.py   # JavaScript/JSX chunker (tree-sitter-javascript)
 │   └── terraform.py    # Terraform/HCL chunker (tree-sitter-hcl)
-├── chunks/             # Intermediate JSONL files
+├── .chunks/            # Intermediate JSONL files
 ├── sessions/           # Chat session histories
 ├── plans/              # Implementation planning documents
 └── requirements.txt

@@ -5,7 +5,7 @@ Reads EMBED_MODEL, OPENAI_BASE_URL, and OPENAI_API_KEY from the .env file
 (via llm_client). The model can also be overridden at call time.
 
 Usage (standalone):
-    python embedder.py chunks/clean-arch.jsonl --output chunks/clean-arch-embedded.jsonl
+    python embedder.py .chunks/clean-arch.jsonl --output .chunks/clean-arch-embedded.jsonl
 
 Programmatic:
     from embedder import embed_chunks

@@ -10,9 +10,9 @@ Configuração via .env (ou variáveis de ambiente):
     LLM_MODEL         — id do modelo de chat (ex: qwen3-4b, llama-3.1-8b)
 
 Uso:
-    python summarizer.py chunks/clean-arch.jsonl
-    python summarizer.py chunks/clean-arch.jsonl --output chunks/clean-arch-summarized.jsonl
-    python summarizer.py chunks/clean-arch.jsonl --model qwen3-4b --skip-existing
+    python summarizer.py .chunks/clean-arch.jsonl
+    python summarizer.py .chunks/clean-arch.jsonl --output .chunks/clean-arch-summarized.jsonl
+    python summarizer.py .chunks/clean-arch.jsonl --model qwen3-4b --skip-existing
 """
 
 from __future__ import annotations

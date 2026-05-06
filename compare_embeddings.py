@@ -14,7 +14,7 @@ Modo "somente busca" (coleções já existentes):
     python compare_embeddings.py <chunks.jsonl> --skip-indexing
 
 Usage completo:
-    python compare_embeddings.py chunks/clean-arch.jsonl \\
+    python compare_embeddings.py .chunks/clean-arch.jsonl \\
         --model-a text-embedding-bge-m3  \\
         --model-b qwen3-embedding         \\
         --col-a  clean_arch_bgem3         \\
