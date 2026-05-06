@@ -29,6 +29,10 @@ Configuration (.env, padrão LLM_*):
     OPENAI_BASE_URL     — fallback for LLM_BASE_URL
     OPENAI_API_KEY      — any string for local servers
 
+System prompts:
+    repo_prompts.json             — JSON file with per-language prompts (required)
+                                    Format: {"typescript": "...", "terraform": "..."}
+
 Output:
     --output FILE       — single JSON file with a list of summaries (default)
     --output-dir DIR    — one JSON file per repository
@@ -38,6 +42,7 @@ Usage:
     python repo_summarize.py /path/to/parent_folder
     python repo_summarize.py /a /b /c --output .repos/repos.json
     python repo_summarize.py /workspace --output-dir .repos/
+    python repo_summarize.py /a /b --skip-existing  # skip repos already in output
 """
 
 from __future__ import annotations
@@ -87,58 +92,27 @@ _SKIP_DIRS = {
     ".pytest_cache", ".mypy_cache",
 }
 
-_SYSTEM_PROMPTS: dict[str, str] = {
-    "typescript": (
-        "You are a senior product engineer cataloguing TypeScript repositories. "
-        "Given a repository's metadata (name, structure, AST digest, manifests, "
-        "README), produce ONE JSON object describing it.\n\n"
-        "Reply with ONLY the JSON object — no preamble, no markdown fences, "
-        "no commentary. Required keys:\n"
-        "  - repository: string (use the provided repo name unless the README "
-        "establishes a different canonical name)\n"
-        "  - summary: 1-3 sentences describing the service's business behavior. "
-        "Follow this structure: (1) what event or request triggers it and what "
-        "input it carries; (2) what specific field or record it reads or mutates "
-        "and under what condition; (3) the exact names of any events, responses, "
-        "or side-effects it produces for each outcome. "
-        "Use concrete names found in the source (event types, field names, "
-        "status values) — do not replace them with generic terms like "
-        "'subsequent actions' or 'relevant events'.\n"
-        "  - main_technologies: array of strings (languages, frameworks, key tooling)\n"
-        "  - domain: short category (e.g. 'Web API', 'CLI tool', 'Data pipeline', "
-        "'Infrastructure', 'Library', 'Event-driven service')\n"
-        "  - tags: array of short retrieval-oriented tags\n\n"
-        "Be precise and grounded in the input. Do not invent technologies that "
-        "are not visible in the manifests, structure, or README."
-    ),
-    "terraform": (
-        "You are a senior cloud infrastructure engineer cataloguing Terraform repositories. "
-        "Given a repository's metadata (name, structure, AST digest of HCL blocks, manifests, "
-        "README), produce ONE JSON object describing it.\n\n"
-        "Reply with ONLY the JSON object — no preamble, no markdown fences, "
-        "no commentary. Required keys:\n"
-        "  - repository: string (use the provided repo name unless the README "
-        "establishes a different canonical name)\n"
-        "  - summary: 1-3 sentences describing the infrastructure being provisioned. "
-        "Follow this structure: (1) what cloud provider(s) and high-level infrastructure "
-        "components are defined (e.g. VPC, ECS cluster, RDS instance, IAM roles); "
-        "(2) which environments or workspaces are targeted and any notable "
-        "per-environment configuration; "
-        "(3) the exact resource type names and module names that form the core of this "
-        "configuration — use the identifiers from the HCL digest, not generic terms like "
-        "'cloud resources' or 'infrastructure components'.\n"
-        "  - main_technologies: array of strings (cloud provider, Terraform version, "
-        "key modules and providers used)\n"
-        "  - domain: short category (e.g. 'Networking', 'Compute', 'Database', "
-        "'Full-stack infra', 'Security', 'Monitoring', 'Storage', 'Multi-environment IaC')\n"
-        "  - tags: array of short retrieval-oriented tags (cloud provider, resource types, "
-        "environments, key services)\n\n"
-        "Be precise and grounded in the HCL digest. Do not invent resources, modules, "
-        "or providers that are not visible in the digest or README."
-    ),
-}
+# ── System-prompt loading ────────────────────────────────────────────────────
+_PROMPTS_FILE = Path("repo_prompts.json")
 
-_DEFAULT_SYSTEM_PROMPT = _SYSTEM_PROMPTS["typescript"]
+
+def _load_system_prompts() -> dict[str, str]:
+    try:
+        data: dict = json.loads(_PROMPTS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        print(f"error: {_PROMPTS_FILE} not found. Create it with 'typescript' and 'terraform' keys.", file=sys.stderr)
+        sys.exit(1)
+    except Exception as exc:
+        print(f"error: could not load {_PROMPTS_FILE}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(data, dict):
+        print(f"error: {_PROMPTS_FILE} must be a JSON object.", file=sys.stderr)
+        sys.exit(1)
+    return {lang.lower(): text for lang, text in data.items() if isinstance(text, str) and text.strip()}
+
+
+_SYSTEM_PROMPTS: dict[str, str] = _load_system_prompts()
+_DEFAULT_SYSTEM_PROMPT = _SYSTEM_PROMPTS.get("typescript", next(iter(_SYSTEM_PROMPTS.values()), ""))
 
 def _read_text(path: Path, max_chars: int = 6000) -> str:
     try:
@@ -671,6 +645,11 @@ def main() -> int:
         help="Print the raw LLM response for each repository (useful for debugging "
              "JSON extraction failures)",
     )
+    ap.add_argument(
+        "--skip-existing", action="store_true", default=False, dest="skip_existing",
+        help="Skip repositories that already have an entry in the output file "
+             "(matched by resolved path). Useful for incremental updates.",
+    )
     args = ap.parse_args()
 
     if not args.model:
@@ -686,6 +665,42 @@ def main() -> int:
     if not repos:
         print("No repositories found.", file=sys.stderr)
         return 1
+
+    # Load existing summaries so we can skip already-indexed repos and preserve them.
+    existing_summaries: list[dict] = []
+    existing_paths: set[Path] = set()
+    if args.skip_existing:
+        if not args.output_dir and args.output.is_file():
+            try:
+                existing_summaries = json.loads(args.output.read_text(encoding="utf-8"))
+                existing_paths = {
+                    Path(e["path"]).resolve()
+                    for e in existing_summaries
+                    if isinstance(e.get("path"), str)
+                }
+            except Exception as exc:
+                print(f"warn: could not read existing output file: {exc}", file=sys.stderr)
+        elif args.output_dir and args.output_dir.is_dir():
+            for f in args.output_dir.glob("*.json"):
+                try:
+                    entry = json.loads(f.read_text(encoding="utf-8"))
+                    if isinstance(entry.get("path"), str):
+                        existing_paths.add(Path(entry["path"]).resolve())
+                except Exception:
+                    pass
+
+    if args.skip_existing and existing_paths:
+        skipped = [r for r in repos if r.resolve() in existing_paths]
+        repos = [r for r in repos if r.resolve() not in existing_paths]
+        if skipped:
+            print(f"Skipping {len(skipped)} already-indexed repositor{'y' if len(skipped) == 1 else 'ies'}:")
+            for r in skipped:
+                print(f"  - {r}")
+            print()
+
+    if not repos:
+        print("All repositories are already indexed. Nothing to do.")
+        return 0
 
     print(f"Discovered {len(repos)} repositor{'y' if len(repos) == 1 else 'ies'}:")
     for r in repos:
@@ -721,11 +736,12 @@ def main() -> int:
 
     if not args.output_dir:
         args.output.parent.mkdir(parents=True, exist_ok=True)
+        all_summaries = existing_summaries + summaries
         args.output.write_text(
-            json.dumps(summaries, ensure_ascii=False, indent=2),
+            json.dumps(all_summaries, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        print(f"\nWrote {len(summaries)} summaries -> {args.output}")
+        print(f"\nWrote {len(all_summaries)} summaries -> {args.output}")
     else:
         print(f"\nWrote {len(summaries)} summary files -> {args.output_dir}")
 

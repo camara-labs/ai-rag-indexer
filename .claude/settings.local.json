@@ -8,7 +8,10 @@
       "Bash(.venv/Scripts/python.exe repo_summarize.py --help)",
       "Bash(python repo_summarize.py --help)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('repo_summarize.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(Get-ChildItem -Path \"c:\\\\repos\\\\ai-rag-study\\\\indexer\" -Recurse)",
+      "Bash(Select-Object -Property FullName, PSIsContainer)",
+      "Bash(ConvertTo-Json -Depth 100)"
     ]
   }
 }
