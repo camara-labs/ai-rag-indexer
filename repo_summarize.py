@@ -87,29 +87,59 @@ _SKIP_DIRS = {
     ".pytest_cache", ".mypy_cache",
 }
 
-_SYSTEM_PROMPT = (
-    "You are a senior product engineer cataloguing repositories. "
-    "Given a repository's metadata (name, structure, AST digest, manifests, "
-    "README), produce ONE JSON object describing it.\n\n"
-    "Reply with ONLY the JSON object — no preamble, no markdown fences, "
-    "no commentary. Required keys:\n"
-    "  - repository: string (use the provided repo name unless the README "
-    "establishes a different canonical name)\n"
-    "  - summary: 1-3 sentences describing the service's business behavior. "
-    "Follow this structure: (1) what event or request triggers it and what "
-    "input it carries; (2) what specific field or record it reads or mutates "
-    "and under what condition; (3) the exact names of any events, responses, "
-    "or side-effects it produces for each outcome. "
-    "Use concrete names found in the source (event types, field names, "
-    "status values) — do not replace them with generic terms like "
-    "'subsequent actions' or 'relevant events'.\n"
-    "  - main_technologies: array of strings (languages, frameworks, key tooling)\n"
-    "  - domain: short category (e.g. 'Web API', 'CLI tool', 'Data pipeline', "
-    "'Infrastructure', 'Library', 'Event-driven service')\n"
-    "  - tags: array of short retrieval-oriented tags\n\n"
-    "Be precise and grounded in the input. Do not invent technologies that "
-    "are not visible in the manifests, structure, or README."
-)
+_SYSTEM_PROMPTS: dict[str, str] = {
+    "typescript": (
+        "You are a senior product engineer cataloguing TypeScript repositories. "
+        "Given a repository's metadata (name, structure, AST digest, manifests, "
+        "README), produce ONE JSON object describing it.\n\n"
+        "Reply with ONLY the JSON object — no preamble, no markdown fences, "
+        "no commentary. Required keys:\n"
+        "  - repository: string (use the provided repo name unless the README "
+        "establishes a different canonical name)\n"
+        "  - summary: 1-3 sentences describing the service's business behavior. "
+        "Follow this structure: (1) what event or request triggers it and what "
+        "input it carries; (2) what specific field or record it reads or mutates "
+        "and under what condition; (3) the exact names of any events, responses, "
+        "or side-effects it produces for each outcome. "
+        "Use concrete names found in the source (event types, field names, "
+        "status values) — do not replace them with generic terms like "
+        "'subsequent actions' or 'relevant events'.\n"
+        "  - main_technologies: array of strings (languages, frameworks, key tooling)\n"
+        "  - domain: short category (e.g. 'Web API', 'CLI tool', 'Data pipeline', "
+        "'Infrastructure', 'Library', 'Event-driven service')\n"
+        "  - tags: array of short retrieval-oriented tags\n\n"
+        "Be precise and grounded in the input. Do not invent technologies that "
+        "are not visible in the manifests, structure, or README."
+    ),
+    "terraform": (
+        "You are a senior cloud infrastructure engineer cataloguing Terraform repositories. "
+        "Given a repository's metadata (name, structure, AST digest of HCL blocks, manifests, "
+        "README), produce ONE JSON object describing it.\n\n"
+        "Reply with ONLY the JSON object — no preamble, no markdown fences, "
+        "no commentary. Required keys:\n"
+        "  - repository: string (use the provided repo name unless the README "
+        "establishes a different canonical name)\n"
+        "  - summary: 1-3 sentences describing the infrastructure being provisioned. "
+        "Follow this structure: (1) what cloud provider(s) and high-level infrastructure "
+        "components are defined (e.g. VPC, ECS cluster, RDS instance, IAM roles); "
+        "(2) which environments or workspaces are targeted and any notable "
+        "per-environment configuration; "
+        "(3) the exact resource type names and module names that form the core of this "
+        "configuration — use the identifiers from the HCL digest, not generic terms like "
+        "'cloud resources' or 'infrastructure components'.\n"
+        "  - main_technologies: array of strings (cloud provider, Terraform version, "
+        "key modules and providers used)\n"
+        "  - domain: short category (e.g. 'Networking', 'Compute', 'Database', "
+        "'Full-stack infra', 'Security', 'Monitoring', 'Storage', 'Multi-environment IaC')\n"
+        "  - tags: array of short retrieval-oriented tags (cloud provider, resource types, "
+        "environments, key services)\n\n"
+        "Be precise and grounded in the HCL digest. Do not invent resources, modules, "
+        "or providers that are not visible in the digest or README."
+    ),
+}
+
+_DEFAULT_SYSTEM_PROMPT = _SYSTEM_PROMPTS["typescript"]
+
 def _read_text(path: Path, max_chars: int = 6000) -> str:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -371,14 +401,15 @@ _DIGEST_BUILDERS = {
 }
 
 
-def build_chunk_digest(repo_root: Path) -> tuple[str, list[str]]:
+def build_chunk_digest(repo_root: Path) -> tuple[str, list[str], list]:
     """Run the existing chunkers and aggregate their output into a compact digest.
 
     Returns
     -------
-    (digest_text, languages)
+    (digest_text, languages, all_chunks)
         ``digest_text`` is the multi-section string ready to feed the LLM,
-        ``languages`` is the list of supported languages actually present.
+        ``languages`` is the list of supported languages actually present,
+        ``all_chunks`` is the flat list of all Chunk objects (with .code, etc.).
 
     Raises
     ------
@@ -400,18 +431,51 @@ def build_chunk_digest(repo_root: Path) -> tuple[str, list[str]]:
         )
 
     sections: list[str] = []
+    all_chunks: list = []
     for lang in supported:
         chunks = chunk_repo(language=lang, repo_path=repo_root)
+        all_chunks.extend(chunks)
         if lang == "typescript":
             from chunkers.typescript import extract_package_info
             sections.append(_digest_typescript(chunks, extract_package_info(repo_root)))
         else:
             sections.append(_DIGEST_BUILDERS[lang](chunks))
 
-    return "\n\n".join(sections), supported
+    return "\n\n".join(sections), supported, all_chunks
 
 
-def _build_user_message(repo_root: Path, digest: str) -> str:
+def _build_code_section(chunks, max_chars: int = 120000) -> str:
+    """Format actual source code from chunks, grouped by file, up to max_chars."""
+    if not chunks:
+        return ""
+
+    by_file: dict[str, list] = {}
+    for ch in chunks:
+        by_file.setdefault(ch.file_path, []).append(ch)
+    for file_chunks in by_file.values():
+        file_chunks.sort(key=lambda c: c.start_line)
+
+    parts: list[str] = []
+    total = 0
+    for file_path in sorted(by_file):
+        entries = [
+            f"// {ch.kind}: {ch.symbol} (lines {ch.start_line}-{ch.end_line})\n{ch.code}"
+            for ch in by_file[file_path]
+        ]
+        block = f"--- {file_path} ---\n" + "\n\n".join(entries)
+        cost = len(block)
+        if total + cost > max_chars:
+            remaining = max_chars - total
+            if remaining > 300:
+                parts.append(block[:remaining] + "\n... (truncated)")
+            break
+        parts.append(block)
+        total += cost
+
+    return "\n\n".join(parts)
+
+
+def _build_user_message(repo_root: Path, digest: str, chunks=None) -> str:
     readme_name, readme = _find_readme(repo_root)
     structure = _scan_structure(repo_root)
     key_signals = _key_file_signals(repo_root)
@@ -428,8 +492,16 @@ def _build_user_message(repo_root: Path, digest: str) -> str:
     parts.append("")
     parts.extend(key_signals)
     parts.append("")
+
+    if chunks:
+        code_section = _build_code_section(chunks)
+        if code_section:
+            parts.append("--- Source code (AST chunks) ---")
+            parts.append(code_section)
+            parts.append("")
+
     if readme:
-        parts.append(f"--- {readme_name} ---")
+        parts.append(f"--- {readme_name} (may be outdated) ---")
         parts.append(readme)
     else:
         parts.append("(no README detected)")
@@ -484,16 +556,25 @@ def summarize_repository(
     max_tokens: int = 4096,
     verbose: bool = False,
 ) -> dict:
-    digest, languages = build_chunk_digest(repo_root)
+    digest, languages, all_chunks = build_chunk_digest(repo_root)
+    system_prompt = _SYSTEM_PROMPTS.get(languages[0], _DEFAULT_SYSTEM_PROMPT)
 
     client = make_client(base_url)
-    user_msg = _build_user_message(repo_root, digest)
+    user_msg = _build_user_message(repo_root, digest, all_chunks)
+
+    if verbose:
+        tqdm.write(
+            f"\n--- LLM request ({repo_root.name}) ---"
+            f"\n[system]\n{system_prompt}"
+            f"\n\n[user]\n{user_msg}"
+            f"\n---"
+        )
 
     t0 = time.monotonic()
     resp = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_msg},
         ],
         max_tokens=max_tokens,
